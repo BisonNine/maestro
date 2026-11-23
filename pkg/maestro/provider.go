@@ -1,0 +1,291 @@
+package maestro
+
+import (
+	"encoding/json"
+	"fmt"
+	"io"
+	"strconv"
+	"strings"
+
+	"go.bison9.com/maestro/config"
+	"go.bison9.com/maestro/global"
+	"go.bison9.com/maestro/lists"
+	"go.bison9.com/maestro/llm"
+	"go.bison9.com/maestro/logging"
+	"go.bison9.com/maestro/playbooks"
+	"go.bison9.com/maestro/projects"
+	"go.bison9.com/maestro/reference"
+	"go.bison9.com/maestro/runner"
+	"go.bison9.com/maestro/tasks"
+
+	"go.bison9.com/agent/toolspec"
+)
+
+// HostDeps encapsulates the host-provided services
+type HostDeps struct {
+	Logger *logging.Logger
+	Runner *runner.Runner
+	// Dispatcher, when set, makes the host own LLM selection and execution:
+	// Maestro's tools only describe the work (a DispatchRequest) and this turns
+	// it into a DispatchResult. With a host Dispatcher present, Maestro does not
+	// choose the model and the LLM-management tools are not exposed.
+	Dispatcher llm.Dispatcher
+	// ImportAllowed, when set, confines file_import to paths the host permits:
+	// it is consulted with the resolved absolute path of every file the import
+	// would read. Unset means imports may come from anywhere (standalone).
+	ImportAllowed func(absPath string) bool
+}
+
+// Provider implements toolspec.ToolProvider for Maestro.
+type Provider struct {
+	config             *config.Config
+	logger             *logging.Logger
+	reference          *reference.Service
+	playbooks          *playbooks.Service
+	projects           *projects.Service
+	tasks              *tasks.Service
+	lists              *lists.Service
+	llm                *llm.Service
+	runner             *runner.Runner
+	markNonDestructive bool
+	hostDispatched     bool
+	deps               toolspec.Deps
+}
+
+// RegisterTools initializes the Maestro services from deps.Cfg and returns the tools.
+func (p *Provider) RegisterTools(deps toolspec.Deps) []toolspec.ToolDefinition {
+	p.deps = deps
+	cfg, ok := deps.Cfg.(*config.Config)
+	if !ok {
+		// If no config provided, create a default one
+		cfg = config.New()
+	}
+	p.config = cfg
+
+	// Initialize logger and runner from Host if provided
+	var rInst *runner.Runner
+	var hostDispatcher llm.Dispatcher
+	var importAllowed func(string) bool
+	if hd, ok := deps.Host.(HostDeps); ok {
+		if hd.Logger != nil {
+			p.logger = hd.Logger
+		} else {
+			p.logger = logging.NewWithWriter(io.Discard)
+		}
+		if hd.Runner != nil {
+			rInst = hd.Runner
+		}
+		hostDispatcher = hd.Dispatcher
+		importAllowed = hd.ImportAllowed
+	} else if l, ok := deps.Host.(*logging.Logger); ok && l != nil {
+		// Fallback for previous implementation
+		p.logger = l
+	} else {
+		p.logger = logging.NewWithWriter(io.Discard)
+	}
+
+	// Recreate the initialization from server.go
+	var externalDirs []reference.ExternalDir
+	for _, refDir := range cfg.ReferenceDirs() {
+		externalDirs = append(externalDirs, reference.ExternalDir{
+			Path:  refDir.Path,
+			Mount: refDir.Mount,
+		})
+	}
+
+	p.reference = reference.NewService(
+		reference.WithEmbeddedFS(cfg.EmbeddedFS()),
+		reference.WithExternalDirs(externalDirs),
+		reference.WithLogger(p.logger),
+	)
+	p.playbooks = playbooks.NewService(cfg.PlaybooksDir(), p.logger,
+		playbooks.WithFileModes(cfg.DirMode(), cfg.FileMode()))
+	p.projects = projects.NewService(cfg, p.logger)
+	if importAllowed != nil {
+		p.projects.SetImportAllowed(importAllowed)
+	}
+	p.tasks = tasks.NewService(cfg, p.projects, p.logger)
+	p.lists = lists.NewService(
+		lists.WithProjectsDir(cfg.ProjectsDir()),
+		lists.WithPlaybooksDir(cfg.PlaybooksDir()),
+		lists.WithEmbeddedFS(cfg.EmbeddedFS()),
+		lists.WithLogger(p.logger),
+		lists.WithFileModes(cfg.DirMode(), cfg.FileMode()),
+	)
+	p.llm = llm.NewService(cfg, p.logger, nil)
+
+	// The runner dispatches through the host's Dispatcher when one is injected
+	// (the host owns model selection); otherwise it uses Maestro's own llm.Service.
+	dispatcher := llm.Dispatcher(p.llm)
+	if hostDispatcher != nil {
+		dispatcher = hostDispatcher
+		p.hostDispatched = true
+	}
+
+	if rInst != nil {
+		p.runner = rInst
+	} else {
+		p.runner = runner.New(cfg, p.logger, nil, p.playbooks, p.reference, dispatcher, p.tasks, p.projects)
+	}
+	// Under host-dispatch the runner must not resolve or require a Maestro LLM —
+	// the host owns model selection.
+	p.runner.SetHostDispatched(p.hostDispatched)
+	p.markNonDestructive = cfg.MarkNonDestructive()
+
+	defs := p.getToolDefinitions()
+	if p.hostDispatched {
+		// The host owns LLM selection, so Maestro does not expose the
+		// LLM-management tools — its tools only describe work to dispatch.
+		defs = withoutTools(defs, global.ToolLLMList, global.ToolLLMDispatch, global.ToolLLMTest)
+		// The host delivers completions via the injected sink, so the legacy
+		// HTTP callback_url parameter is meaningless here — hide it.
+		defs = withoutParam(defs, "callback_url")
+		// Model hints are still accepted, but they name a host model rather than
+		// a Maestro LLM config entry: say so instead of pointing at llm_list.
+		defs = withParamDescription(defs, "llm_model_id", hostModelHintDescription)
+		defs = withParamDescription(defs, "qa_llm_model_id", hostQAModelHintDescription)
+		if importAllowed != nil {
+			defs = withToolParamDescription(defs, global.ToolFileImport, "source", hostImportSourceDescription)
+		}
+	}
+	return defs
+}
+
+// hostImportSourceDescription replaces file_import's "anywhere on the
+// filesystem" wording when the host confines imports.
+const hostImportSourceDescription = "Source file or directory path (absolute). Only paths this agent may already read — its workspace, its mounts and its allowed read paths — can be imported; anything else is refused."
+
+// withToolParamDescription returns defs with the description of parameter param
+// on the tool named tool replaced by desc.
+func withToolParamDescription(defs []toolspec.ToolDefinition, tool, param, desc string) []toolspec.ToolDefinition {
+	for i := range defs {
+		if defs[i].Name != tool {
+			continue
+		}
+		for j := range defs[i].Parameters {
+			if defs[i].Parameters[j].Name == param {
+				defs[i].Parameters[j].Description = desc
+			}
+		}
+	}
+	return defs
+}
+
+// Under host dispatch the host (not Maestro) resolves model hints, so the
+// parameter descriptions must describe the host's vocabulary.
+const (
+	hostModelHintDescription   = "Optional model hint for the worker, passed to the host: one of the host agent's configured model aliases. Leave empty to use the host's default model. Unknown aliases fail the task without retry."
+	hostQAModelHintDescription = "Optional model hint for QA, passed to the host: one of the host agent's configured model aliases. Leave empty to use the host's default model. Unknown aliases fail the task without retry."
+)
+
+// withParamDescription returns defs with the description of every parameter
+// named param replaced by desc.
+func withParamDescription(defs []toolspec.ToolDefinition, param, desc string) []toolspec.ToolDefinition {
+	for i := range defs {
+		for j := range defs[i].Parameters {
+			if defs[i].Parameters[j].Name == param {
+				defs[i].Parameters[j].Description = desc
+			}
+		}
+	}
+	return defs
+}
+
+// withoutTools returns defs with any tool whose Name matches one of names removed.
+func withoutTools(defs []toolspec.ToolDefinition, names ...string) []toolspec.ToolDefinition {
+	drop := make(map[string]bool, len(names))
+	for _, n := range names {
+		drop[n] = true
+	}
+	out := defs[:0]
+	for _, d := range defs {
+		if !drop[d.Name] {
+			out = append(out, d)
+		}
+	}
+	return out
+}
+
+// withoutParam returns defs with the named parameter removed from every tool.
+func withoutParam(defs []toolspec.ToolDefinition, param string) []toolspec.ToolDefinition {
+	for i := range defs {
+		params := defs[i].Parameters
+		filtered := params[:0]
+		for _, prm := range params {
+			if prm.Name != param {
+				filtered = append(filtered, prm)
+			}
+		}
+		defs[i].Parameters = filtered
+	}
+	return defs
+}
+
+// createJSONResult formats data as a toolspec.Result
+func createJSONResult(data interface{}) (*toolspec.Result, error) {
+	b, err := json.Marshal(data)
+	if err != nil {
+		return &toolspec.Result{ForLLM: "Failed to serialize JSON", IsError: true}, nil
+	}
+	return &toolspec.Result{ForLLM: string(b)}, nil
+}
+
+func parseString(args map[string]any, key string, def string) string {
+	if val, ok := args[key]; ok {
+		if s, ok := val.(string); ok {
+			return s
+		}
+	}
+	return def
+}
+
+func parseFloat64(args map[string]any, key string, def float64) float64 {
+	if val, ok := args[key]; ok {
+		switch v := val.(type) {
+		case float64:
+			return v
+		case float32:
+			return float64(v)
+		case int:
+			return float64(v)
+		case string:
+			if f, err := strconv.ParseFloat(v, 64); err == nil {
+				return f
+			}
+		}
+	}
+	return def
+}
+
+func parseBool(args map[string]any, key string, def bool) bool {
+	if val, ok := args[key]; ok {
+		if b, ok := val.(bool); ok {
+			return b
+		}
+		if s, ok := val.(string); ok {
+			return strings.ToLower(s) == "true"
+		}
+	}
+	return def
+}
+
+func (p *Provider) logToolCall(toolName string, params map[string]string) {
+	if p.logger == nil {
+		return
+	}
+	if len(params) == 0 {
+		p.logger.Infof("Tool %s called", toolName)
+		return
+	}
+	var parts []string
+	for k, v := range params {
+		if v != "" {
+			parts = append(parts, fmt.Sprintf("%s=%s", k, v))
+		}
+	}
+	if len(parts) == 0 {
+		p.logger.Infof("Tool %s called", toolName)
+	} else {
+		p.logger.Infof("Tool %s called: %s", toolName, strings.Join(parts, ", "))
+	}
+}

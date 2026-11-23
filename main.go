@@ -1,0 +1,207 @@
+/******************************************************************************
+ * Copyright (c) 2025-2026 Tenebris Technologies Inc.                         *
+ * Please see the LICENSE file for details                                    *
+ ******************************************************************************/
+
+package main
+
+import (
+	"flag"
+	"fmt"
+	"os"
+
+	"go.bison9.com/maestro/app"
+	"go.bison9.com/maestro/config"
+	"go.bison9.com/maestro/global"
+	"go.bison9.com/maestro/logging"
+	"go.bison9.com/maestro/pkg/maestro"
+	"go.bison9.com/maestro/server"
+)
+
+func main() {
+	// Top-level panic recovery
+	defer func() {
+		if rec := recover(); rec != nil {
+			_, _ = fmt.Fprintf(os.Stderr, "FATAL PANIC: %v\n", rec)
+			os.Exit(2)
+		}
+	}()
+
+	// Parse command line flags
+	var (
+		configPath = flag.String("config", "", "Path to configuration file")
+		version    = flag.Bool("version", false, "Show version information")
+		help       = flag.Bool("help", false, "Show help information")
+	)
+	flag.Parse()
+
+	// Handle version flag
+	if *version {
+		buildTime, goVersion := app.BuildInfo()
+		fmt.Printf("%s %s\n%s\n%s\n", app.Name(), app.Version(), app.TagLine(), app.Copyright())
+		if buildTime != "" {
+			fmt.Printf("Built: %s\n", buildTime)
+		}
+		fmt.Printf("Go: %s\n", goVersion)
+		return
+	}
+
+	// Handle help flag
+	if *help {
+		showHelp()
+		return
+	}
+
+	// Normal MCP server mode - pass embedded FS and optional config path
+	opts := []config.Option{config.WithEmbeddedFS(maestro.EmbeddedReference)}
+	if *configPath != "" {
+		opts = append(opts, config.WithConfigPath(*configPath))
+	}
+	cfg := config.New(opts...)
+
+	// Load and validate configuration
+	if err := cfg.Load(); err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "Configuration error: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Initialize logger with config path
+	logger, err := logging.New(cfg.LogFile(), cfg.DirMode(), cfg.FileMode())
+	if err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "Failed to initialize logging: %v\n", err)
+		os.Exit(1)
+	}
+	defer func(logger *logging.Logger) {
+		// Ensure logs are flushed before exit
+		_ = logger.Sync()
+		_ = logger.Close()
+	}(logger)
+
+	// Set log level from config
+	logger.SetLevel(cfg.LogLevel())
+
+	// Announce startup
+	logger.Infof("%s %s starting", app.Name(), app.Version())
+	logger.Info(app.Copyright())
+	logger.Infof("Using configuration file: %s", cfg.ConfigPath())
+
+	// Log first-run message
+	if cfg.IsFirstRun() {
+		logger.Infof("First run detected - created default configuration at %s", cfg.ConfigPath())
+		logger.Info("Please edit the configuration to enable LLMs and set API keys")
+	}
+
+	// Drain warnings collected during config load (before logger existed)
+	for _, w := range cfg.Warnings() {
+		logger.Warn(w)
+	}
+
+	// Log each configured LLM at DEBUG level (post-validation, so Enabled reflects executable checks)
+	for _, llm := range cfg.LLMs() {
+		status := "disabled"
+		if llm.Enabled {
+			status = "enabled"
+		}
+		outputFmt := llm.OutputFormat
+		if outputFmt == "" {
+			outputFmt = "generic"
+		}
+		llmType := llm.Type
+		if llmType == "" {
+			llmType = "command"
+		}
+		logger.Debugf("LLM %s: type=%s command=%q args=%v stdin=%v output_format=%s timeout=%ds [%s]",
+			llm.ID, llmType, llm.Command, llm.Args, llm.Stdin, outputFmt, llm.Timeout, status)
+	}
+
+	// Log warning if no LLMs are enabled
+	if !cfg.HasEnabledLLM() {
+		logger.Warn("No LLMs are enabled - llm_dispatch will not work until you enable at least one LLM in the configuration")
+	}
+
+	// Optional LLM validation on startup
+	if cfg.ValidateLLMsOnStartup() {
+		logger.Info("LLM validation on startup is enabled, but not yet implemented")
+		// TODO: Implement LLM validation if needed
+	}
+
+	// Create and start server
+	srv, err := server.New(cfg, logger)
+	if err != nil {
+		logger.Fatalf("Failed to create server: %v", err)
+	}
+
+	// Run the server
+	if err := srv.Run(); err != nil {
+		logger.Fatalf("Server error: %v", err)
+	}
+}
+
+func showHelp() {
+	fmt.Printf(`%s %s - %s
+
+USAGE:
+    %s [OPTIONS]
+
+OPTIONS:
+    --config PATH    Path to configuration file
+                     (default: $MAESTRO_CONFIG or %s/%s)
+    --version        Show version information
+    --help          Show this help message
+
+DESCRIPTION:
+    Maestro is a Model Context Protocol (MCP) server that provides:
+
+    - Read-only embedded reference documentation
+    - Playbooks for reusable knowledge and templates
+    - Project-scoped task management system
+    - Multi-LLM dispatch capabilities
+    - Persistent state for LLM session resumption
+
+CONFIGURATION:
+    The server requires a JSON configuration file that defines:
+
+    - playbooks_dir: Directory for playbooks (default: playbooks)
+    - projects_dir: Directory for projects (default: projects)
+    - internal: Directory for internal project metadata
+    - llms: Named endpoints with API credentials and descriptions
+
+    On first run, a default configuration is created in %s.
+    Edit the config file to add your LLM API keys.
+
+THREE DOMAINS:
+    - Reference: Read-only documentation embedded in the binary
+    - Playbooks: User-managed reusable knowledge and templates
+    - Projects: Work containers with tasks, files, and logs
+
+FIRST RUN:
+    1. Run %s once to create default config
+    2. Edit %s/%s to configure LLM API keys
+    3. Run %s again to start the server
+
+EXAMPLES:
+    # Start with default config
+    %s
+
+    # Start with custom config
+    %s --config /path/to/config.json
+
+    # Show version
+    %s --version
+
+ENVIRONMENT:
+    MAESTRO_CONFIG    Path to configuration file (if --config not used)
+
+For more information, call start_here, or use the file_list and file_get
+tools with source="reference" to access the embedded documentation.
+`, app.Name(), app.Version(), app.TagLine(),
+		app.Name(),
+		global.DefaultBaseDir, global.DefaultConfigFileName,
+		global.DefaultBaseDir,
+		app.Name(),
+		global.DefaultBaseDir, global.DefaultConfigFileName,
+		app.Name(),
+		app.Name(),
+		app.Name(),
+		app.Name())
+}
