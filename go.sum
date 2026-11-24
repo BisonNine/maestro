@@ -39,8 +39,8 @@ github.com/xeipuuv/gojsonschema v1.2.0 h1:LhYJRs+L4fBtjZUfuSZIKGeVu0QRy8e5Xi7D17
 github.com/xeipuuv/gojsonschema v1.2.0/go.mod h1:anYRn/JVcOK2ZgGU+IjEV4nwlhoK5sQluxsYJ78Id3Y=
 github.com/yosida95/uritemplate/v3 v3.0.2 h1:Ed3Oyj9yrmi9087+NczuL5BwkIc4wvTb5zIM+UJPGz4=
 github.com/yosida95/uritemplate/v3 v3.0.2/go.mod h1:ILOh0sOhIJR3+L/8afwt/kE++YT040gmv5BQTMR2HP4=
-go.bison9.com/agent v0.0.0-20261124015320-b805ea474b80 h1:0gU8IulLb/aG1+uk7wEK38S0WB+Bi0u9b/+kTuee7PA=
-go.bison9.com/agent v0.0.0-20261124015320-b805ea474b80/go.mod h1:WOpjs3XtSFtKit5KV0/4LiDWJHE3c81pDUE69XsVNYI=
+go.bison9.com/agent v0.2.0 h1:QSnpLTJ01Gn9AQJZY41Fl8AaNUoZIxMAWdSHImDc7yE=
+go.bison9.com/agent v0.2.0/go.mod h1:YTinf4So7wXdu1IuQGNlro3YH7IToftFzQLN3C8ISnk=
 go.yaml.in/yaml/v3 v3.0.5 h1:N6y/pJk8buWs9NY5ERU2HSMfm+IuD/OtfdAnq6kESPw=
 go.yaml.in/yaml/v3 v3.0.5/go.mod h1:HVTZu1O7/Vkt2N+BFy8Zza+lnLsABggaTM2ZpNIGuKg=
 golang.org/x/sys v0.50.0 h1:dkKZEFTEKaLr1sjhs0WiKqoi8Jj5nHbS3Njmx1UoMJs=

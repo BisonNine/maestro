@@ -60,7 +60,10 @@ func TestImportFiles_NoPredicate_AnyPath(t *testing.T) {
 // permitted area is refused outright, naming the path.
 func TestImportFiles_PredicateRefusesSource(t *testing.T) {
 	svc := newImportTestService(t)
-	allowed := t.TempDir()
+	allowed, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	svc.SetImportAllowed(func(p string) bool { return strings.HasPrefix(p, allowed+string(os.PathSeparator)) })
 
 	outside := filepath.Join(t.TempDir(), "secret.txt")
@@ -82,7 +85,10 @@ func TestImportFiles_PredicateRefusesSource(t *testing.T) {
 // counted rather than copied.
 func TestImportFiles_PredicateSkipsEntriesInsideDirectory(t *testing.T) {
 	svc := newImportTestService(t)
-	allowed := t.TempDir()
+	allowed, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	svc.SetImportAllowed(func(p string) bool { return strings.HasPrefix(p, allowed+string(os.PathSeparator)) })
 
 	dir := filepath.Join(allowed, "docs")

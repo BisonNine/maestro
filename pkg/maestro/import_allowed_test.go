@@ -31,7 +31,10 @@ func importSourceDescription(defs []toolspec.ToolDefinition) string {
 // refused path errors, a permitted one imports — and the tool's source
 // description no longer promises "anywhere on the filesystem".
 func TestHostDeps_ImportAllowed_Wired(t *testing.T) {
-	allowed := t.TempDir()
+	allowed, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	p := &Provider{}
 	cfg := newPreparedConfig(t)
 	defs := p.RegisterTools(toolspec.Deps{Cfg: cfg, Host: HostDeps{
@@ -81,7 +84,10 @@ func TestHostDeps_NoImportAllowed_StandaloneWording(t *testing.T) {
 // TestHostDeps_ImportAllowed_RefusedCountSurfaced: entries the host refuses
 // inside a directory import are reported to the caller as files_refused.
 func TestHostDeps_ImportAllowed_RefusedCountSurfaced(t *testing.T) {
-	allowed := t.TempDir()
+	allowed, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	p := &Provider{}
 	p.RegisterTools(toolspec.Deps{Cfg: newPreparedConfig(t), Host: HostDeps{
 		Dispatcher:    stubDispatcher{},
