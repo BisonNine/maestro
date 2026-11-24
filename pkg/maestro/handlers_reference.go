@@ -27,9 +27,28 @@ func (p *Provider) handleStartHere(call *toolspec.ToolCall) (*toolspec.Result, e
 	if p.hostDispatched {
 		item.Content = hostDispatchStartText(item.Content)
 	}
+	if p.knowledge {
+		item.Content = strings.TrimRight(item.Content, "\n") + "\n\n" + hostKnowledgeSection
+	}
 
 	return createJSONResult(item)
 }
+
+// hostKnowledgeSection is appended to start.md when the host supplies
+// knowledge bases.
+const hostKnowledgeSection = `### Knowledge bases
+
+The host provides knowledge bases. ` + "`task_create`, `task_update`, `task_dispatch` and `list_create_tasks`" + ` take an optional ` + "`knowledge`" + ` object:
+
+` + "```json" + `
+{"kb": "standards", "include": ["SFR/FCS_COP.1"], "query": "key sizes", "limit": 5}
+` + "```" + `
+
+- ` + "`include`" + ` lists concept IDs (up to 16). Each record and the records it includes are inserted in full into the worker, QA and revision prompts.
+- ` + "`query`" + ` adds up to ` + "`limit`" + ` ranked passages (default 5, at most 20).
+- A missing record, or required records larger than 256 KiB, fails the task without retry.
+- In ` + "`list_create_tasks`" + `, ` + "`{{id}}` and `{{title}}`" + ` in kb, include and query are replaced by each item's values.
+`
 
 // Text substituted into start.md under host dispatch (see hostDispatchStartText).
 const (
@@ -45,6 +64,8 @@ Maestro is embedded in a host that owns model selection. The LLM-management tool
 **Pre-flight check**: not performed — the host's fallback chain handles model availability.
 
 **Timeouts**: each dispatched prompt is bounded by the host's turn timeout. A task that exceeds it fails and is retried according to the task set's limits.
+
+**Billing**: ` + "`task_run` and `task_dispatch`" + ` take an optional ` + "`billing`" + ` code (1 to 64 letters, digits, ` + "`-`, `_` or `.`" + `) that the host records the tasks' model calls under. Without it, a task keeps the code it first ran under, else takes the host's current code.
 
 `
 )

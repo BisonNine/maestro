@@ -698,6 +698,13 @@ func (s *Service) UpdateTask(project, taskUUID string, updates map[string]interf
 			if llmModelID, ok := workUpdates["llm_model_id"].(string); ok {
 				task.Work.LLMModelID = llmModelID
 			}
+			// knowledge replaces the stored request; a nil request clears it.
+			if knowledge, ok := workUpdates["knowledge"].(*global.KnowledgeRequest); ok {
+				task.Work.Knowledge = knowledge
+			}
+			if billing, ok := workUpdates["billing"].(string); ok {
+				task.Work.Billing = billing
+			}
 		}
 
 		// Update QA fields if provided

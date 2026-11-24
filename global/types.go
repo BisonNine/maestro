@@ -165,6 +165,12 @@ type WorkExecution struct {
 	Invocations            int        `json:"invocations"`               // Number of worker LLM invocations (any exit code)
 	InfraRetries           int        `json:"infra_retries,omitempty"`   // Infrastructure failures (couldn't execute)
 	LastAttemptAt          *time.Time `json:"last_attempt_at,omitempty"` // For retry delay calculation
+	// Knowledge, when set, inserts knowledge base records and passages into
+	// the worker, QA and revision prompts. Only an embedding host supplies it.
+	Knowledge *KnowledgeRequest `json:"knowledge,omitempty"`
+	// Billing is the billing code the task's model calls are recorded under,
+	// stamped when the task first runs. Only an embedding host uses it.
+	Billing string `json:"billing,omitempty"`
 }
 
 // QAExecution tracks the QA phase of task execution
@@ -261,6 +267,9 @@ type RunRequest struct {
 	Path     string `json:"path,omitempty"`
 	Type     string `json:"type,omitempty"` // Filter by task type
 	Parallel *bool  `json:"parallel"`       // Override taskset parallel setting (nil = use taskset setting)
+	// Billing, when set, is the billing code for every task the run executes,
+	// replacing any code stored on them. Only an embedding host uses it.
+	Billing string `json:"billing,omitempty"`
 }
 
 // RunResult represents the result of a runner execution

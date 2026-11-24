@@ -1019,10 +1019,43 @@ func (s *Service) CreateTasks(
 	sample int,
 	parallel bool,
 ) (*global.ListCreateTasksResponse, error) {
+	return s.CreateTasksWithKnowledge(taskCreator,
+		listSource, project, playbook, listName,
+		targetProject, path,
+		titleTemplate, taskType, priority,
+		llmModelID, instructionsFile, instructionsFileSource, instructionsText, basePrompt,
+		qaTemplate, sample, parallel, nil)
+}
+
+// CreateTasksWithKnowledge is CreateTasks with a knowledge request for every
+// created task. In knowledgeTemplate, kb, each include entry and query take the
+// same {{title}} and {{id}} item placeholders as the title template, and each
+// item's request is validated after substitution. Every item is checked before
+// any task (or task set) is created. A nil knowledgeTemplate creates tasks
+// without knowledge, exactly as CreateTasks.
+func (s *Service) CreateTasksWithKnowledge(
+	taskCreator TaskCreator,
+	listSource, project, playbook, listName string,
+	targetProject, path string,
+	titleTemplate, taskType string, priority int,
+	llmModelID, instructionsFile, instructionsFileSource, instructionsText, basePrompt string,
+	qaTemplate *global.QAExecution,
+	sample int,
+	parallel bool,
+	knowledgeTemplate *global.KnowledgeRequest,
+) (*global.ListCreateTasksResponse, error) {
 	// Load the list
 	list, _, err := s.loadList(listSource, project, playbook, listName)
 	if err != nil {
 		return nil, err
+	}
+
+	if knowledgeTemplate != nil {
+		for _, item := range list.Items {
+			if _, err := itemKnowledge(knowledgeTemplate, item); err != nil {
+				return nil, fmt.Errorf("item '%s': %w", item.ID, err)
+			}
+		}
 	}
 
 	if len(list.Items) == 0 {
@@ -1109,6 +1142,10 @@ func (s *Service) CreateTasks(
 			Prompt:                 fullPrompt,
 			Status:                 global.ExecutionStatusWaiting,
 		}
+		if knowledgeTemplate != nil {
+			// Checked for every item above, so this cannot fail.
+			work.Knowledge, _ = itemKnowledge(knowledgeTemplate, item)
+		}
 
 		// Create QA execution object from template or auto-enable from list templates
 		var qa *global.QAExecution
@@ -1157,6 +1194,26 @@ func (s *Service) CreateTasks(
 		ItemCount:    len(list.Items),
 		TaskIDs:      taskIDs,
 	}, nil
+}
+
+// itemKnowledge returns tmpl with the item's {{title}} and {{id}} substituted
+// into kb, each include entry and query, validated.
+func itemKnowledge(tmpl *global.KnowledgeRequest, item global.ListItem) (*global.KnowledgeRequest, error) {
+	sub := func(v string) string {
+		v = strings.ReplaceAll(v, "{{title}}", item.Title)
+		return strings.ReplaceAll(v, "{{id}}", item.ID)
+	}
+	k := &global.KnowledgeRequest{KB: sub(tmpl.KB), Query: sub(tmpl.Query), Limit: tmpl.Limit}
+	if tmpl.Query != "" && k.Query == "" {
+		return nil, fmt.Errorf("knowledge.query is empty after substitution")
+	}
+	for _, id := range tmpl.Include {
+		k.Include = append(k.Include, sub(id))
+	}
+	if err := k.Validate(); err != nil {
+		return nil, err
+	}
+	return k, nil
 }
 
 // randomSample returns a random sample of n items from the given slice.

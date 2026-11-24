@@ -1,7 +1,8 @@
 # Maestro — build and test entry points.
 #
 #   make          run the full test suite, then build (binaries only if tests pass)
-#   make test     the one gate: vet, go test -race, and the MCP regression (test.sh)
+#   make test     the one gate: vulnerability scan, vet, go test -race, and the
+#                 MCP regression (test.sh)
 #   make build    build the maestro binary at the project root (no tests)
 #   make clean    remove build output, test artifacts and the Go test cache
 #   make install  install the built binary: /usr/local/bin when run as root,
@@ -10,7 +11,7 @@
 # test.sh needs probe (MCPProbe), jq and zip on PATH; it reports the missing
 # tool and exits non-zero rather than skipping.
 
-.PHONY: all test build clean install fmt vet lint
+.PHONY: all test build clean install fmt vet lint govulncheck
 
 BINARY   := maestro
 GO       ?= go
@@ -41,7 +42,7 @@ build:
 	$(GO) build $(LDFLAGS) -o $(BINARY) .
 
 ## test: the full regression suite. Exits non-zero on any failure.
-test:
+test: govulncheck
 	@echo "== go vet"
 	@$(GO) vet ./...
 	@echo "== go test -race"
@@ -53,6 +54,10 @@ test:
 	@PROBE="$(PROBE)" ./test.sh
 	@echo ""
 	@echo "== SUMMARY: go vet clean; go test all packages passed; test.sh all checks passed (counts above)"
+
+## govulncheck: fail on any known vulnerability the code calls.
+govulncheck:
+	@go run go.bison9.com/vulncheck/cmd/vulncheck@latest .
 
 ## clean: build output, test artifacts and the Go test cache.
 clean:

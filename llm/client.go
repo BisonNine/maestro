@@ -35,6 +35,9 @@ type DispatchRequest struct {
 	Prompt      string           `json:"prompt"`
 	ContextKeys []string         `json:"context_keys,omitempty"`
 	Options     *DispatchOptions `json:"options,omitempty"`
+	// Billing is the billing code the host records the call under; empty when
+	// the host gave none. Maestro's own dispatch ignores it.
+	Billing string `json:"billing,omitempty"`
 }
 
 // DispatchOptions represents options for LLM dispatch
