@@ -1,6 +1,7 @@
 package maestro
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -39,6 +40,11 @@ type HostDeps struct {
 	// whose results are inserted into their prompts (the "knowledge" task
 	// parameter). Unset means the parameter is not offered.
 	Knowledge knowledge.Source
+	// Billing, when set with a Dispatcher, returns the host's current billing
+	// code for the context a tool call arrived on. task_run and task_dispatch
+	// use it for tasks given no code; it is called while the tool call is
+	// handled, not when the tasks later run.
+	Billing func(ctx context.Context) string
 }
 
 // Provider implements toolspec.ToolProvider for Maestro.
@@ -73,6 +79,7 @@ func (p *Provider) RegisterTools(deps toolspec.Deps) []toolspec.ToolDefinition {
 	var hostDispatcher llm.Dispatcher
 	var importAllowed func(string) bool
 	var knowledgeSrc knowledge.Source
+	var hostBilling func(context.Context) string
 	if hd, ok := deps.Host.(HostDeps); ok {
 		if hd.Logger != nil {
 			p.logger = hd.Logger
@@ -85,6 +92,7 @@ func (p *Provider) RegisterTools(deps toolspec.Deps) []toolspec.ToolDefinition {
 		hostDispatcher = hd.Dispatcher
 		importAllowed = hd.ImportAllowed
 		knowledgeSrc = hd.Knowledge
+		hostBilling = hd.Billing
 	} else if l, ok := deps.Host.(*logging.Logger); ok && l != nil {
 		// Fallback for previous implementation
 		p.logger = l
@@ -142,11 +150,20 @@ func (p *Provider) RegisterTools(deps toolspec.Deps) []toolspec.ToolDefinition {
 	// source on a runner it keeps.
 	p.runner.SetKnowledge(knowledgeSrc)
 	p.knowledge = knowledgeSrc != nil
+	// Billing codes are recorded by the host, so they apply only under host
+	// dispatch. Set on every registration, like the knowledge source.
+	if !p.hostDispatched {
+		hostBilling = nil
+	}
+	p.runner.SetHostBilling(hostBilling)
 	p.markNonDestructive = cfg.MarkNonDestructive()
 
 	defs := p.getToolDefinitions()
 	if !p.knowledge {
 		defs = withoutParam(defs, "knowledge")
+	}
+	if !p.hostDispatched {
+		defs = withoutParam(defs, "billing")
 	}
 	if p.hostDispatched {
 		// The host owns LLM selection, so Maestro does not expose the

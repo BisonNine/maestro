@@ -746,6 +746,10 @@ func (p *Provider) handleTaskDispatch(call *toolspec.ToolCall) (*toolspec.Result
 	if knowledgeErr != "" {
 		return &toolspec.Result{ForLLM: knowledgeErr, IsError: true}, nil
 	}
+	billing, billingErr := p.billingArg(call.Args)
+	if billingErr != "" {
+		return &toolspec.Result{ForLLM: billingErr, IsError: true}, nil
+	}
 
 	dispatchReq := &runner.DispatchRequest{
 		Project:                project,
@@ -758,6 +762,7 @@ func (p *Provider) handleTaskDispatch(call *toolspec.ToolCall) (*toolspec.Result
 		InstructionsFileSource: instructionsFileSource,
 		CallbackURL:            callbackURL,
 		Knowledge:              knowledgeReq,
+		Billing:                billing,
 	}
 
 	result, err := p.runner.RunDispatch(call.Ctx, dispatchReq, completionSink(call))

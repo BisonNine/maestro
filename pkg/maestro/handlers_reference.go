@@ -65,6 +65,8 @@ Maestro is embedded in a host that owns model selection. The LLM-management tool
 
 **Timeouts**: each dispatched prompt is bounded by the host's turn timeout. A task that exceeds it fails and is retried according to the task set's limits.
 
+**Billing**: ` + "`task_run` and `task_dispatch`" + ` take an optional ` + "`billing`" + ` code (1 to 64 letters, digits, ` + "`-`, `_` or `.`" + `) that the host records the tasks' model calls under. Without it, a task keeps the code it first ran under, else takes the host's current code.
+
 `
 )
 

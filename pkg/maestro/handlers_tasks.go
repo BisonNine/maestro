@@ -30,12 +30,17 @@ func (p *Provider) handleTaskRun(call *toolspec.ToolCall) (*toolspec.Result, err
 	if project == "" {
 		return nil, fmt.Errorf("%s", "project is required")
 	}
+	billing, billingErr := p.billingArg(call.Args)
+	if billingErr != "" {
+		return &toolspec.Result{ForLLM: billingErr, IsError: true}, nil
+	}
 
 	// Build run request - parallel is optional override
 	runReq := &global.RunRequest{
 		Project: project,
 		Path:    path,
 		Type:    taskType,
+		Billing: billing,
 	}
 
 	// Only set Parallel if explicitly provided

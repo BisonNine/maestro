@@ -702,6 +702,9 @@ func (s *Service) UpdateTask(project, taskUUID string, updates map[string]interf
 			if knowledge, ok := workUpdates["knowledge"].(*global.KnowledgeRequest); ok {
 				task.Work.Knowledge = knowledge
 			}
+			if billing, ok := workUpdates["billing"].(string); ok {
+				task.Work.Billing = billing
+			}
 		}
 
 		// Update QA fields if provided

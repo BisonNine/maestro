@@ -50,7 +50,9 @@ type Runner struct {
 	// prompt to the host and lets it pick the model.
 	hostDispatched atomic.Bool
 	// knowledge is the host's knowledge source (nil: none); see SetKnowledge.
-	knowledge       atomic.Pointer[knowledgeHolder]
+	knowledge atomic.Pointer[knowledgeHolder]
+	// hostBilling returns the host's billing code (nil: none); see SetHostBilling.
+	hostBilling     atomic.Pointer[billingHolder]
 	runningProjects sync.Map       // map[string]bool - tracks which projects have runs in progress
 	taskHistory     sync.Map       // map[string][]global.Message - accumulates history by task UUID
 	activeRuns      sync.WaitGroup // tracks active run goroutines for graceful shutdown
@@ -64,6 +66,7 @@ type recoveryState struct {
 	scheduleIndex int         // current index in test_schedule_seconds
 	llmID         string      // which LLM triggered recovery
 	llmConfig     *config.LLM // LLM config for rate limit patterns
+	billing       string      // billing code of the task that triggered recovery
 	mu            sync.Mutex  // protects state updates
 }
 
@@ -73,7 +76,7 @@ func newRecoveryState() *recoveryState {
 }
 
 // enterRecovery enters recovery mode for the given LLM
-func (rs *recoveryState) enterRecovery(llmID string, llmConfig *config.LLM) {
+func (rs *recoveryState) enterRecovery(llmID string, llmConfig *config.LLM, billing string) {
 	rs.mu.Lock()
 	defer rs.mu.Unlock()
 
@@ -88,6 +91,7 @@ func (rs *recoveryState) enterRecovery(llmID string, llmConfig *config.LLM) {
 	rs.scheduleIndex = 0
 	rs.llmID = llmID
 	rs.llmConfig = llmConfig
+	rs.billing = billing
 }
 
 // exitRecovery exits recovery mode
@@ -98,6 +102,7 @@ func (rs *recoveryState) exitRecovery() {
 	rs.scheduleIndex = 0
 	rs.llmID = ""
 	rs.llmConfig = nil
+	rs.billing = ""
 }
 
 // advanceSchedule moves to the next interval in the test schedule
@@ -156,6 +161,13 @@ func (rs *recoveryState) getLLMID() string {
 	rs.mu.Lock()
 	defer rs.mu.Unlock()
 	return rs.llmID
+}
+
+// getBilling returns the billing code of the task that triggered recovery
+func (rs *recoveryState) getBilling() string {
+	rs.mu.Lock()
+	defer rs.mu.Unlock()
+	return rs.billing
 }
 
 // runBudget tracks LLM call budget for a run to prevent runaway costs
@@ -716,6 +728,13 @@ func (r *Runner) GetTaskStatus(project, path, taskType string) (*TaskStatusResul
 // Run executes eligible tasks for a project in the background
 // Returns immediately with the count of tasks queued
 func (r *Runner) Run(ctx context.Context, req *global.RunRequest, notify CompletionSink) (*global.RunResult, error) {
+	// The host's billing code is captured now, on the request's context: the
+	// run continues on a detached context, by when it may have changed.
+	billing := runBilling{explicit: req.Billing}
+	if billing.explicit == "" {
+		billing.host = r.hostBillingFor(ctx)
+	}
+
 	// Validate project exists
 	if !r.tasks.ProjectExists(req.Project) {
 		return nil, fmt.Errorf("project not found: %s", req.Project)
@@ -835,7 +854,7 @@ func (r *Runner) Run(ctx context.Context, req *global.RunRequest, notify Complet
 	// response is returned) while keeping its values: a host dispatcher relies on
 	// them for orchestration state such as sub-agent recursion depth.
 	execParams := &runExecutionParams{
-		ctx:           detachContext(ctx),
+		ctx:           withRunBilling(detachContext(ctx), billing),
 		req:           req,
 		taskSetList:   taskSetList,
 		eligibleTasks: eligibleTasks,
@@ -1267,7 +1286,7 @@ func (r *Runner) runParallel(ctx context.Context, project, path string, tasks []
 					if llmConfig != nil && llmConfig.RecoveryConfig != nil {
 						r.logger.Infof("Task %d: Failed - entering recovery mode for LLM %s", t.ID, llmID)
 						r.logToProject(project, fmt.Sprintf("Task %d: Failed - entering recovery mode for LLM %s", t.ID, llmID))
-						recovery.enterRecovery(llmID, llmConfig)
+						recovery.enterRecovery(llmID, llmConfig, updatedTask.Work.Billing)
 					}
 				}
 			}(task)
@@ -1327,8 +1346,9 @@ func (r *Runner) handleRecovery(ctx context.Context, project string, recovery *r
 		r.logToProject(project, fmt.Sprintf("Probing LLM %s", llmID))
 
 		req := &llm.DispatchRequest{
-			LLMID:  llmID,
-			Prompt: testPrompt,
+			LLMID:   llmID,
+			Prompt:  testPrompt,
+			Billing: recovery.getBilling(),
 		}
 		result, err := r.llm.Dispatch(ctx, req)
 
@@ -1395,7 +1415,7 @@ func (r *Runner) executeTaskWithRecovery(ctx context.Context, project, path stri
 		if llmConfig != nil && llmConfig.RecoveryConfig != nil {
 			r.logger.Infof("Task %d: Failed - entering recovery mode for LLM %s", task.ID, llmID)
 			r.logToProject(project, fmt.Sprintf("Task %d: Failed - entering recovery mode for LLM %s", task.ID, llmID))
-			recovery.enterRecovery(llmID, llmConfig)
+			recovery.enterRecovery(llmID, llmConfig, updatedTask.Work.Billing)
 		}
 	}
 }
@@ -1416,6 +1436,10 @@ func (r *Runner) executeTask(ctx context.Context, project, path string, task *gl
 	r.logger.Infof("Task %d: Waiting for rate limiter", task.ID)
 	r.rateLimiter.Wait()
 	r.logger.Infof("Task %d: Rate limiter passed", task.ID)
+
+	// Resolve and stamp the billing code before any model call, including the
+	// QA-only path below.
+	r.resolveBilling(ctx, project, task)
 
 	// Check if work has already completed successfully (has results file with worker response)
 	// This prevents re-calling the worker LLM when only QA needs to be retried
@@ -1520,8 +1544,9 @@ func (r *Runner) executeTask(ctx context.Context, project, path string, task *gl
 	r.logToProject(project, fmt.Sprintf("Task %d: Calling LLM: %s, mode: %s, prompt: %s, size: %d bytes", task.ID, displayName, mode, promptInput, promptSize))
 
 	dispatchReq := &llm.DispatchRequest{
-		LLMID:  llmID,
-		Prompt: fullPrompt,
+		LLMID:   llmID,
+		Prompt:  fullPrompt,
+		Billing: task.Work.Billing,
 	}
 
 	r.logger.Infof("Task %d: Dispatching to LLM service", task.ID)
@@ -2660,8 +2685,9 @@ func (r *Runner) executeQA(ctx context.Context, project, path string, task *glob
 
 	// Call LLM
 	dispatchReq := &llm.DispatchRequest{
-		LLMID:  qaLLMID,
-		Prompt: qaPrompt,
+		LLMID:   qaLLMID,
+		Prompt:  qaPrompt,
+		Billing: task.Work.Billing,
 	}
 
 	r.logLLMDispatch(task.ID, project, path, qaLLMID, len(qaPrompt))
@@ -3103,8 +3129,9 @@ func (r *Runner) reviseWork(ctx context.Context, project, path string, task *glo
 
 	// Call LLM
 	dispatchReq := &llm.DispatchRequest{
-		LLMID:  llmID,
-		Prompt: fullPrompt,
+		LLMID:   llmID,
+		Prompt:  fullPrompt,
+		Billing: task.Work.Billing,
 	}
 
 	r.logLLMDispatch(task.ID, project, path, llmID, len(fullPrompt))
@@ -3468,6 +3495,7 @@ type DispatchRequest struct {
 	InstructionsFileSource string
 	CallbackURL            string
 	Knowledge              *global.KnowledgeRequest // optional; needs a knowledge source (SetKnowledge)
+	Billing                string                   // optional billing code; empty: the host's (SetHostBilling)
 }
 
 // DispatchResult is returned immediately from RunDispatch
@@ -3511,6 +3539,13 @@ func (r *Runner) RunDispatch(ctx context.Context, req *DispatchRequest, notify C
 		return nil, fmt.Errorf("failed to create dispatch taskset: %w", err)
 	}
 
+	// The host's billing code is captured now, on the request's context: the
+	// task runs on a detached context, by when it may have changed.
+	billing := req.Billing
+	if billing == "" {
+		billing = r.hostBillingFor(ctx)
+	}
+
 	// Create the single task
 	work := &global.WorkExecution{
 		Prompt:                 req.Prompt,
@@ -3520,6 +3555,7 @@ func (r *Runner) RunDispatch(ctx context.Context, req *DispatchRequest, notify C
 		LLMModelID:             req.LLMModelID,
 		Status:                 global.ExecutionStatusWaiting,
 		Knowledge:              req.Knowledge,
+		Billing:                billing,
 	}
 
 	task, err := r.tasks.CreateTask(req.Project, path, title, "", work, nil)
