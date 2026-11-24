@@ -9,6 +9,7 @@ import (
 
 	"go.bison9.com/maestro/config"
 	"go.bison9.com/maestro/global"
+	"go.bison9.com/maestro/knowledge"
 	"go.bison9.com/maestro/lists"
 	"go.bison9.com/maestro/llm"
 	"go.bison9.com/maestro/logging"
@@ -34,6 +35,10 @@ type HostDeps struct {
 	// it is consulted with the resolved absolute path of every file the import
 	// would read. Unset means imports may come from anywhere (standalone).
 	ImportAllowed func(absPath string) bool
+	// Knowledge, when set, lets tasks name knowledge base records and queries
+	// whose results are inserted into their prompts (the "knowledge" task
+	// parameter). Unset means the parameter is not offered.
+	Knowledge knowledge.Source
 }
 
 // Provider implements toolspec.ToolProvider for Maestro.
@@ -49,6 +54,7 @@ type Provider struct {
 	runner             *runner.Runner
 	markNonDestructive bool
 	hostDispatched     bool
+	knowledge          bool // a knowledge source is set: the knowledge parameter is offered
 	deps               toolspec.Deps
 }
 
@@ -66,6 +72,7 @@ func (p *Provider) RegisterTools(deps toolspec.Deps) []toolspec.ToolDefinition {
 	var rInst *runner.Runner
 	var hostDispatcher llm.Dispatcher
 	var importAllowed func(string) bool
+	var knowledgeSrc knowledge.Source
 	if hd, ok := deps.Host.(HostDeps); ok {
 		if hd.Logger != nil {
 			p.logger = hd.Logger
@@ -77,6 +84,7 @@ func (p *Provider) RegisterTools(deps toolspec.Deps) []toolspec.ToolDefinition {
 		}
 		hostDispatcher = hd.Dispatcher
 		importAllowed = hd.ImportAllowed
+		knowledgeSrc = hd.Knowledge
 	} else if l, ok := deps.Host.(*logging.Logger); ok && l != nil {
 		// Fallback for previous implementation
 		p.logger = l
@@ -130,9 +138,16 @@ func (p *Provider) RegisterTools(deps toolspec.Deps) []toolspec.ToolDefinition {
 	// Under host-dispatch the runner must not resolve or require a Maestro LLM —
 	// the host owns model selection.
 	p.runner.SetHostDispatched(p.hostDispatched)
+	// Set on every registration so a host reload refreshes (or removes) the
+	// source on a runner it keeps.
+	p.runner.SetKnowledge(knowledgeSrc)
+	p.knowledge = knowledgeSrc != nil
 	p.markNonDestructive = cfg.MarkNonDestructive()
 
 	defs := p.getToolDefinitions()
+	if !p.knowledge {
+		defs = withoutParam(defs, "knowledge")
+	}
 	if p.hostDispatched {
 		// The host owns LLM selection, so Maestro does not expose the
 		// LLM-management tools — its tools only describe work to dispatch.

@@ -165,6 +165,9 @@ type WorkExecution struct {
 	Invocations            int        `json:"invocations"`               // Number of worker LLM invocations (any exit code)
 	InfraRetries           int        `json:"infra_retries,omitempty"`   // Infrastructure failures (couldn't execute)
 	LastAttemptAt          *time.Time `json:"last_attempt_at,omitempty"` // For retry delay calculation
+	// Knowledge, when set, inserts knowledge base records and passages into
+	// the worker, QA and revision prompts. Only an embedding host supplies it.
+	Knowledge *KnowledgeRequest `json:"knowledge,omitempty"`
 }
 
 // QAExecution tracks the QA phase of task execution

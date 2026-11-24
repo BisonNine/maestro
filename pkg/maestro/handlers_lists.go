@@ -544,6 +544,21 @@ func (p *Provider) handleListCreateTasks(call *toolspec.ToolCall) (*toolspec.Res
 		return nil, fmt.Errorf("%s", "type parameter is required")
 	}
 
+	// The knowledge template is checked for shape here and validated per item
+	// after substitution.
+	knowledgeTmpl, knowledgeSet, err := parseKnowledgeArg(call.Args)
+	if knowledgeSet {
+		if !p.knowledge {
+			return &toolspec.Result{ForLLM: errKnowledgeUnavailable, IsError: true}, nil
+		}
+		if err != nil {
+			return &toolspec.Result{ForLLM: err.Error(), IsError: true}, nil
+		}
+		if knowledgeTmpl == nil {
+			return &toolspec.Result{ForLLM: "knowledge.kb is required", IsError: true}, nil
+		}
+	}
+
 	// Validate instructions files exist before creating tasks
 	if instructionsFile != "" {
 		if err := p.validateInstructionsFile(targetProject, instructionsFile, instructionsFileSource); err != nil {
@@ -569,7 +584,7 @@ func (p *Provider) handleListCreateTasks(call *toolspec.ToolCall) (*toolspec.Res
 		}
 	}
 
-	result, err := p.lists.CreateTasks(
+	result, err := p.lists.CreateTasksWithKnowledge(
 		p.tasks,
 		listSource, listProject, listPlaybook, listName,
 		targetProject, path,
@@ -578,6 +593,7 @@ func (p *Provider) handleListCreateTasks(call *toolspec.ToolCall) (*toolspec.Res
 		qa,
 		sample,
 		parallel,
+		knowledgeTmpl,
 	)
 	if err != nil {
 		return &toolspec.Result{ForLLM: fmt.Sprint(err.Error()), IsError: true}, nil

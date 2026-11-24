@@ -48,7 +48,9 @@ type Runner struct {
 	// host application that owns model selection. In that mode Maestro does not
 	// resolve, validate, or require any model of its own — it just hands the
 	// prompt to the host and lets it pick the model.
-	hostDispatched  atomic.Bool
+	hostDispatched atomic.Bool
+	// knowledge is the host's knowledge source (nil: none); see SetKnowledge.
+	knowledge       atomic.Pointer[knowledgeHolder]
 	runningProjects sync.Map       // map[string]bool - tracks which projects have runs in progress
 	taskHistory     sync.Map       // map[string][]global.Message - accumulates history by task UUID
 	activeRuns      sync.WaitGroup // tracks active run goroutines for graceful shutdown
@@ -1449,6 +1451,16 @@ func (r *Runner) executeTask(ctx context.Context, project, path string, task *gl
 	// Store resolved canonical LLM ID for result file
 	task.Work.LLMModelID = llmID
 
+	// Load the task's knowledge before any invocation is counted: a task whose
+	// required records cannot be provided fails now, without retry.
+	knowledgeText, err := r.knowledgeSection(ctx, task)
+	if err != nil {
+		r.logToProject(project, fmt.Sprintf("Task %d: Failed - %v", task.ID, err))
+		r.logger.Errorf("Task %d: Failed - %v", task.ID, err)
+		r.failTaskPreExecution(project, task, global.ErrorCodeKnowledgeFailed, err.Error(), result)
+		return
+	}
+
 	// Update task metadata but keep status as 'waiting' until fully complete
 	// This ensures restarts will pick up interrupted tasks
 	r.logger.Infof("Task %d: Updating task metadata (status stays waiting until complete)", task.ID)
@@ -1473,7 +1485,7 @@ func (r *Runner) executeTask(ctx context.Context, project, path string, task *gl
 
 	// Build prompt from instructions_file, instructions, prompt
 	r.logger.Infof("Task %d: Building prompt", task.ID)
-	fullPrompt, err := r.buildPrompt(project, path, task)
+	fullPrompt, err := r.buildPrompt(project, path, task, knowledgeText)
 	if err != nil {
 		r.logger.Errorf("Task %d: Failed to build prompt: %v", task.ID, err)
 		r.logToProject(project, fmt.Sprintf("Task %d: Failed to build prompt: %v", task.ID, err))
@@ -1857,7 +1869,7 @@ func (r *Runner) validateReportTemplate(project, templatePath, templateName stri
 }
 
 // buildPrompt builds the full prompt from project context, instructions_file, instructions_text, and prompt
-func (r *Runner) buildPrompt(project, path string, task *global.Task) (string, error) {
+func (r *Runner) buildPrompt(project, path string, task *global.Task, knowledgeText string) (string, error) {
 	var sb strings.Builder
 
 	// 0. Always inject project name (mandatory for cross-project isolation)
@@ -1886,6 +1898,9 @@ func (r *Runner) buildPrompt(project, path string, task *global.Task) (string, e
 		sb.WriteString(task.Work.InstructionsText)
 		sb.WriteString("\n\n")
 	}
+
+	// 2.5. Insert the task's knowledge, if any
+	sb.WriteString(knowledgeText)
 
 	// 3. Append task-specific prompt with separator
 	if task.Work.Prompt != "" {
@@ -2586,11 +2601,17 @@ func (r *Runner) executeQAWorkflow(ctx context.Context, project, path string, ta
 func (r *Runner) executeQA(ctx context.Context, project, path string, task *global.Task, budget *runBudget, limits global.Limits) error {
 	r.logger.Infof("Task %d: Executing QA", task.ID)
 
+	// QA checks the answer against the same knowledge the worker had.
+	knowledgeText, err := r.knowledgeSection(ctx, task)
+	if err != nil {
+		return err
+	}
+
 	// Increment QA invocation count
 	task.QA.Invocations++
 
 	// Build QA prompt
-	qaPrompt, err := r.buildQAPrompt(project, path, task)
+	qaPrompt, err := r.buildQAPrompt(project, path, task, knowledgeText)
 	if err != nil {
 		return fmt.Errorf("failed to build QA prompt: %w", err)
 	}
@@ -2841,7 +2862,7 @@ func (r *Runner) executeQA(ctx context.Context, project, path string, task *glob
 }
 
 // buildQAPrompt builds the QA prompt from project context, instructions and work result
-func (r *Runner) buildQAPrompt(project, path string, task *global.Task) (string, error) {
+func (r *Runner) buildQAPrompt(project, path string, task *global.Task, knowledgeText string) (string, error) {
 	var sb strings.Builder
 
 	// 0. Always inject project name (mandatory for cross-project isolation)
@@ -2882,6 +2903,9 @@ func (r *Runner) buildQAPrompt(project, path string, task *global.Task) (string,
 		sb.WriteString(task.QA.InstructionsText)
 		sb.WriteString("\n\n")
 	}
+
+	// 2.5. Insert the task's knowledge, if any
+	sb.WriteString(knowledgeText)
 
 	// 3. Append QA-specific prompt with separator
 	if task.QA.Prompt != "" {
@@ -2954,6 +2978,11 @@ func (r *Runner) reviseWork(ctx context.Context, project, path string, task *glo
 	r.logger.Infof("Task %d: Revising work with QA feedback", task.ID)
 	r.logToProject(project, fmt.Sprintf("Task %d: Revising work with QA feedback", task.ID))
 
+	knowledgeText, err := r.knowledgeSection(ctx, task)
+	if err != nil {
+		return err
+	}
+
 	// Build revised prompt with QA feedback appended
 	var sb strings.Builder
 
@@ -2983,6 +3012,9 @@ func (r *Runner) reviseWork(ctx context.Context, project, path string, task *glo
 		sb.WriteString(task.Work.InstructionsText)
 		sb.WriteString("\n\n")
 	}
+
+	// 2.5. Insert the task's knowledge, if any
+	sb.WriteString(knowledgeText)
 
 	// 3. Append task-specific prompt with separator
 	if task.Work.Prompt != "" {
@@ -3435,6 +3467,7 @@ type DispatchRequest struct {
 	InstructionsFile       string
 	InstructionsFileSource string
 	CallbackURL            string
+	Knowledge              *global.KnowledgeRequest // optional; needs a knowledge source (SetKnowledge)
 }
 
 // DispatchResult is returned immediately from RunDispatch
@@ -3486,6 +3519,7 @@ func (r *Runner) RunDispatch(ctx context.Context, req *DispatchRequest, notify C
 		InstructionsFileSource: req.InstructionsFileSource,
 		LLMModelID:             req.LLMModelID,
 		Status:                 global.ExecutionStatusWaiting,
+		Knowledge:              req.Knowledge,
 	}
 
 	task, err := r.tasks.CreateTask(req.Project, path, title, "", work, nil)

@@ -353,6 +353,10 @@ func (p *Provider) handleTaskCreate(call *toolspec.ToolCall) (*toolspec.Result, 
 	if title == "" {
 		return nil, fmt.Errorf("%s", "title is required")
 	}
+	knowledgeReq, _, knowledgeErr := p.knowledgeArg(call.Args, false)
+	if knowledgeErr != "" {
+		return &toolspec.Result{ForLLM: knowledgeErr, IsError: true}, nil
+	}
 
 	// Validate instructions files exist before creating task
 	if instructionsFile != "" {
@@ -373,6 +377,7 @@ func (p *Provider) handleTaskCreate(call *toolspec.ToolCall) (*toolspec.Result, 
 		Prompt:                 prompt,
 		LLMModelID:             llmModelID,
 		Status:                 global.ExecutionStatusWaiting,
+		Knowledge:              knowledgeReq,
 	}
 
 	var qa *global.QAExecution
@@ -510,6 +515,10 @@ func (p *Provider) handleTaskUpdate(call *toolspec.ToolCall) (*toolspec.Result, 
 	if taskUUID == "" {
 		return nil, fmt.Errorf("%s", "uuid is required")
 	}
+	knowledgeReq, knowledgeSet, knowledgeErr := p.knowledgeArg(call.Args, true)
+	if knowledgeErr != "" {
+		return &toolspec.Result{ForLLM: knowledgeErr, IsError: true}, nil
+	}
 
 	// Validate instructions files if being updated
 	if instructionsFile != "" {
@@ -556,6 +565,10 @@ func (p *Provider) handleTaskUpdate(call *toolspec.ToolCall) (*toolspec.Result, 
 	}
 	if llmModelID != "" {
 		workUpdates["llm_model_id"] = llmModelID
+	}
+	if knowledgeSet {
+		// Replaces the stored request; a nil request ({}) clears it.
+		workUpdates["knowledge"] = knowledgeReq
 	}
 	if len(workUpdates) > 0 {
 		updates["work"] = workUpdates
@@ -729,6 +742,10 @@ func (p *Provider) handleTaskDispatch(call *toolspec.ToolCall) (*toolspec.Result
 	if prompt == "" && instructionsText == "" && instructionsFile == "" {
 		return nil, fmt.Errorf("%s", "at least one of prompt, instructions_text, or instructions_file is required")
 	}
+	knowledgeReq, _, knowledgeErr := p.knowledgeArg(call.Args, false)
+	if knowledgeErr != "" {
+		return &toolspec.Result{ForLLM: knowledgeErr, IsError: true}, nil
+	}
 
 	dispatchReq := &runner.DispatchRequest{
 		Project:                project,
@@ -740,6 +757,7 @@ func (p *Provider) handleTaskDispatch(call *toolspec.ToolCall) (*toolspec.Result
 		InstructionsFile:       instructionsFile,
 		InstructionsFileSource: instructionsFileSource,
 		CallbackURL:            callbackURL,
+		Knowledge:              knowledgeReq,
 	}
 
 	result, err := p.runner.RunDispatch(call.Ctx, dispatchReq, completionSink(call))
