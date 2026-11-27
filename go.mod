@@ -8,7 +8,7 @@ require (
 	github.com/mark3labs/mcp-go v1.6.0
 	github.com/tenebris-tech/x2md v0.0.3
 	github.com/xeipuuv/gojsonschema v1.2.0
-	go.bison9.com/agent v0.2.1
+	go.bison9.com/agent v0.2.5
 )
 
 require (

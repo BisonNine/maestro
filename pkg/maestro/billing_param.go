@@ -16,7 +16,7 @@ const (
 	billingDispatchDescription = "Optional billing code the host records this task's model calls under: 1 to 64 letters, digits, '-', '_' or '.'. Without it, the host's current code is used."
 )
 
-// errInvalidBilling is returned for a billing code accounting.CheckProject
+// errInvalidBilling is returned for a billing code accounting.CheckBillingCode
 // refuses.
 const errInvalidBilling = "Invalid billing code: use 1 to 64 letters, digits, '-', '_' or '.'."
 
@@ -39,7 +39,7 @@ func (p *Provider) billingArg(args map[string]any) (code, errMsg string) {
 	if code == "" {
 		return "", ""
 	}
-	if err := accounting.CheckProject(code); err != nil {
+	if err := accounting.CheckBillingCode(code); err != nil {
 		return "", errInvalidBilling
 	}
 	return code, ""
